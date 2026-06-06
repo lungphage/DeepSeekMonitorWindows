@@ -1,0 +1,174 @@
+# DeepSeek Monitor Windows
+
+DeepSeek Monitor Windows 是一个面向 Windows 的 DeepSeek API 用量监控桌面应用，用于查看账户余额、当月消费、模型 Token 用量和最近用量趋势。
+
+本项目基于 [felikschu/deepseek-monitor](https://github.com/felikschu/deepseek-monitor) 的开源项目思路做 Windows 系统适配，**感谢原作者 felikschu 的开源工作**。原项目是 Python Web Dashboard，用于追踪 DeepSeek 平台多类公开变化，原项目当前仅支持mac版本。本项目开发目标是 Windows 桌面端监控工具，技术栈和使用方式已经按 Windows 平台重构实现。
+
+郑重声明：本项目不是 DeepSeek 官方产品。
+
+## About
+
+DeepSeek Monitor Windows: Windows desktop adaptation of felikschu/deepseek-monitor, built with Tauri, React and Rust for DeepSeek balance and usage monitoring.
+
+## 页面截图
+
+![DeepSeek Monitor Windows 页面总览](screenshots/overview.png)
+
+## 当前能力
+
+- 查询 DeepSeek API 账户余额，使用 DeepSeek 官方余额接口。
+- 查询 DeepSeek 平台用量数据，包括当月消费、模型 Token 总量、请求数、缓存命中、缓存未命中和输出 Token。
+- 支持 V4 Flash 与 V4 Pro 两类模型用量展示。
+- 支持最近 7 天消费趋势图和模型详情页。
+- 支持 Windows 托盘入口，主窗口默认不进入任务栏。
+- 支持 API Key 保存、清除和余额验证。
+- 支持用量 Token 自动同步和手动粘贴兜底。
+- UI 复用原 macOS 版本的视觉方向，并按 Windows Tauri 窗口做适配。
+
+## 与原项目的关系
+
+| 项目 | 原项目 deepseek-monitor | 本项目 DeepSeekMonitorWindows |
+| --- | --- | --- |
+| 目标平台 | macOS / Web Dashboard | Windows 桌面端 |
+| 核心技术 | Python, Web Server, HTML Dashboard | Tauri 2, React 18, TypeScript, Rust |
+| 主要用途 | 追踪 DeepSeek 网页端、Feature Flags、API 端点、法律文档、GitHub 等公开变化 | 查看 DeepSeek API 余额、消费、Token 用量和趋势 |
+| 启动方式 | Python 服务 + 浏览器访问 | Windows 桌面应用 |
+| 本项目是否复用原事件追踪内容 | 不复用 | 不写入 README，不作为本项目能力声明 |
+
+## 系统要求
+
+- Windows 10 或 Windows 11。
+- Microsoft Edge WebView2 Runtime。Windows 11 通常已内置，Windows 10 如缺失需单独安装。
+- Node.js 18+ 和 npm。
+- Rust 1.77.2+，建议使用 MSVC 工具链。
+- Visual Studio Build Tools，需包含 Desktop development with C++ 相关组件。
+
+## 安装与开发
+
+```powershell
+git clone <your-repo-url>
+cd DeepSeekMonitorWindows
+npm install
+npm run tauri:dev
+```
+
+开发检查：
+
+```powershell
+npm run tauri:check
+```
+
+构建安装包：
+
+```powershell
+npm run build
+```
+
+Tauri 打包目标当前配置为 NSIS 安装包，产物位于 `src-tauri/target/release/bundle/nsis/`。
+
+## 使用方式
+
+打开应用后进入设置页，先配置 DeepSeek API Key。API Key 用于查询账户余额，来自 DeepSeek 开放平台的 API Keys 页面。
+
+因为DeepSeek 官方未提供相应的API接口，因此用量统计需要网页登录 Token。这个 Token 与 API Key 不同，用于访问 DeepSeek 平台的用量接口。
+
+方式一，网页登录自动同步：
+
+- 点击 `方式一：网页登录自动同步`。
+- 在弹出的 DeepSeek 登录窗口完成登录。
+- 登录成功后，应用会从 WebView2 缓存中尝试提取平台用量 Token。
+- 同步成功后会自动刷新本月消费和 Token 统计。
+
+方式二，手动粘贴 token：
+
+- 点击 `方式二：手动粘贴 token`。
+- 按页面提示从浏览器控制台获取 `JSON.parse(localStorage.userToken).value`。
+- 粘贴后保存，作为自动同步失败时的兜底方案。
+
+**Token 可能过期。用量查询失败时，重新执行网页登录同步或手动粘贴即可。**
+
+## 数据存储
+
+应用配置默认存储在：
+
+```text
+%APPDATA%\DeepSeekMonitorWindows\config.json
+```
+
+其中包含 API Key 和用量 Token。**请不要提交该文件，也不要把截图、日志或配置文件中的密钥内容公开。**
+
+WebView2 登录缓存通常位于：
+
+```text
+%LOCALAPPDATA%\com.deepseek.monitor.windows\EBWebView
+```
+
+该目录属于本机运行数据，不应提交到仓库。
+
+## 项目结构
+
+```text
+DeepSeekMonitorWindows/
+├── src/                         # React + TypeScript 前端
+│   ├── main.tsx                 # 主界面、设置页、详情页和 Tauri 调用
+│   └── styles.css               # Windows 桌面 UI 样式
+├── src-tauri/                   # Tauri + Rust 后端
+│   ├── src/lib.rs               # API 调用、配置存储、托盘、网页登录同步
+│   ├── tauri.conf.json          # Tauri 窗口、打包和安全配置
+│   ├── Cargo.toml               # Rust 依赖与包信息
+│   └── capabilities/            # Tauri 权限配置
+├── public/assets/               # DeepSeek 图标与静态资源
+├── scripts/                     # Windows 开发脚本
+├── package.json                 # 前端依赖与脚本
+└── README.md                    # 项目说明
+```
+
+## 不应提交的文件
+
+仓库已通过 `.gitignore` 忽略以下内容：
+
+- `node_modules/`
+- `dist/`
+- `src-tauri/target/`
+- `.env`, `.env.local`, `.env.*.local`
+- `.npmrc`
+- `*.log`, `*.err.log`, `*.out.log`
+- `test-output/`
+- 根目录临时截图 `dashboard-mvp.png`, `settings-mvp.png`, `detail-mvp.png`
+- WebView2 缓存和本地运行配置
+- IDE 配置和系统临时文件
+
+## 依赖
+
+前端运行依赖：
+
+- React 18
+- React DOM 18
+- Tauri JavaScript API 2
+- lucide-react
+
+前端开发依赖：
+
+- Vite 5
+- TypeScript 5
+- Tauri CLI 2
+- React 类型定义
+
+Rust 后端依赖：
+
+- tauri 2.11，启用 tray-icon
+- tauri-plugin-log
+- reqwest 0.12，启用 json
+- serde
+- serde_json
+- log
+
+## 许可证
+
+本项目使用 MIT License，与原项目 README 中声明的许可证保持一致。详见 [LICENSE](LICENSE)。
+
+## 免责声明
+
+本项目仅用于学习和研究目的。请遵守 DeepSeek 的使用条款，合理使用相关接口，避免频繁请求。
+
+DeepSeek 平台页面结构、登录状态、WebView2 缓存和内部用量接口都可能变化，本项目不保证长期可用。**API Key 和用量 Token 属于敏感凭据，使用者需自行承担本机存储、账号安全、网络请求和数据展示带来的风险。**
