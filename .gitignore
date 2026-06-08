@@ -5,7 +5,12 @@ node_modules/
 dist/
 src-tauri/target/
 
-# ---------- Internal docs (README.md only is public) ----------
+# ---------- Markdown docs policy ----------
+*.md
+*.MD
+!README.md
+
+# ---------- Internal docs ----------
 PRD.md
 IMPLEMENTATION_NOTES.md
 docs/

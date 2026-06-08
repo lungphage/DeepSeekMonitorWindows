@@ -166,7 +166,7 @@ Rust 后端依赖：
 
 ## 更新日志
 
-完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+完整发布记录见 GitHub Releases。
 
 ### v1.1.0
 
