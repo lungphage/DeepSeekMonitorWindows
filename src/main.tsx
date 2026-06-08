@@ -13,6 +13,7 @@ import {
   Power,
   RefreshCw,
   Settings,
+  Shirt,
   SunMedium,
   X,
   Zap,
@@ -299,6 +300,15 @@ function DashboardPanel({
   onSettings: () => void;
   onDetail: (model: ModelName) => void;
 }) {
+  const [theme, setTheme] = React.useState<string>(
+    () => localStorage.getItem("ui-theme") || "dark",
+  );
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("ui-theme", next);
+    document.documentElement.setAttribute("data-theme", next);
+  };
   const flash = usage?.models.find((item) => item.key === "flash") ?? null;
   const pro = usage?.models.find((item) => item.key === "pro") ?? null;
   const maxTokens = Math.max(flash?.totalTokens ?? 0, pro?.totalTokens ?? 0, 1);
@@ -317,6 +327,16 @@ function DashboardPanel({
           <button aria-label="刷新" onClick={onRefresh}>
             <RefreshCw size={22} />
           </button>
+          <div className="skin-menu-wrap">
+            <button
+              aria-label="Toggle theme"
+              className="skin-toggle"
+              title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+              onClick={toggleTheme}
+            >
+              <Shirt size={21} />
+            </button>
+          </div>
           <button aria-label="设置" onClick={onSettings}>
             <Settings size={23} />
           </button>
@@ -1116,6 +1136,9 @@ function ModelDetailPanel({
     </section>
   );
 }
+
+// Apply the saved theme before first render to avoid a flash of the wrong skin.
+document.documentElement.setAttribute("data-theme", localStorage.getItem("ui-theme") || "dark");
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
