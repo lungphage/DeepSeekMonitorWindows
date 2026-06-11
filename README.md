@@ -2,10 +2,6 @@
 
 基于 [Joyi-code/DeepSeekMonitorWindows](https://github.com/Joyi-code/DeepSeekMonitorWindows) 的增强版本，Windows 桌面端 DeepSeek API 用量监控工具。
 
-## 截图
-
-![DeepSeek Monitor Windows](screenshots/overview.png)
-
 ## 安装
 
 下载 Release 中的 `DeepSeekMonitorWindows_1.3.0_x64-setup.exe` 安装即可。
