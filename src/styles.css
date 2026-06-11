@@ -60,7 +60,7 @@ button {
 
 .panel {
   width: min(356px, 100vw);
-  height: min(600px, 100vh);
+  height: min(648px, 100vh);
   border-radius: 22px;
   padding: 0 16px 16px;
   overflow: hidden;
@@ -488,7 +488,7 @@ button {
 
 .settings-panel {
   width: min(420px, 100vw);
-  height: min(620px, 100vh);
+  height: min(648px, 100vh);
   border-radius: 22px;
   overflow: hidden;
 }
@@ -1245,4 +1245,247 @@ button:disabled {
   background: rgba(var(--fg), 0.14);
   color: var(--skin-accent);
   box-shadow: inset 0 0 0 1px rgba(var(--fg), 0.12);
+}
+
+/* ==================== v1.2 增强 ==================== */
+
+/* 刷新按钮旋转反馈 */
+@keyframes dsm-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spinning {
+  animation: dsm-spin 0.9s linear infinite;
+}
+
+/* 置顶按钮 */
+.pin-toggle.active {
+  color: var(--skin-accent);
+}
+
+/* 余额卡：充值/赠金拆分 + 可用天数预测 */
+.balance-breakdown {
+  margin: 7px 0 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* 当日消耗环比昨日 */
+.mini-card strong .trend {
+  margin-left: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  vertical-align: 2px;
+}
+
+.mini-card strong .trend.up {
+  color: #ff8a6b;
+}
+
+.mini-card strong .trend.down {
+  color: #4dd07f;
+}
+
+/* 月度预算进度 */
+.budget-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.budget-bar {
+  position: relative;
+  flex: 1;
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(var(--fg), 0.14);
+}
+
+.budget-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4d7cff, #65d0d1);
+}
+
+.budget-bar i.over {
+  background: linear-gradient(90deg, #ff8a4d, #ff5c5c);
+}
+
+.budget-text {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.budget-text.over {
+  color: #ff8a6b;
+}
+
+/* 未配置时的空状态引导 */
+.chart-placeholder.column {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chart-setup-btn {
+  padding: 6px 18px;
+}
+
+/* 提醒与预算设置 */
+.alert-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.alert-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: rgba(var(--fg), 0.78);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.num-input {
+  width: 100%;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 7px;
+  padding: 0 10px;
+  background: rgba(24, 23, 19, 0.78);
+  color: white;
+  font-size: 12px;
+}
+
+.alert-status {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-theme="light"] .num-input {
+  border-color: rgba(40, 70, 100, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+  color: #1a2a40;
+}
+
+/* 详情页工具栏：月份切换 + 范围/指标切换 + 导出 */
+.detail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.month-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.month-nav span {
+  color: rgba(var(--fg), 0.82);
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.month-nav button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(var(--fg), 0.78);
+  cursor: pointer;
+}
+
+.month-nav button:hover:not(:disabled) {
+  background: rgba(var(--fg), 0.14);
+}
+
+.chip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chip {
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: rgba(var(--fg), 0.14);
+  color: rgba(var(--fg), 0.82);
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip.selected {
+  background: var(--brand);
+  color: #fff;
+}
+
+.chip.icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+}
+
+/* 详情图：全月模式细柱 */
+.detail-bars.month {
+  gap: 2px;
+}
+
+.detail-bar-stacked.slim {
+  width: 100%;
+  max-width: 9px;
+  border-radius: 3px;
+}
+
+/* 费用柱与图例 */
+.detail-bar-stacked .seg.cost {
+  background: #60a5fa;
+}
+
+.chart-legend-item .dot.cost,
+.bar-tooltip-row .dot.cost {
+  background: #60a5fa;
+}
+
+[data-theme="light"] .detail-bar-stacked .seg.cost,
+[data-theme="light"] .chart-legend-item .dot.cost,
+[data-theme="light"] .bar-tooltip-row .dot.cost {
+  background: #3b82f6;
+}
+
+/* CSV 导出状态 */
+.export-status {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }

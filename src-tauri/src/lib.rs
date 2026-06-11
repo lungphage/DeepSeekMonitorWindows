@@ -9,19 +9,19 @@ pub fn run() {
         process::Command,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex, OnceLock,
         },
         thread,
         time::Duration,
     };
     use tauri::{
         menu::{Menu, MenuItem},
-        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+        tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
         webview::PageLoadEvent,
         Emitter, Manager, PhysicalPosition, Position, WebviewWindow,
     };
 
-    #[derive(Debug, Default, Deserialize, Serialize)]
+    #[derive(Debug, Clone, Default, Deserialize, Serialize)]
     struct StoredConfig {
         api_key: Option<String>,
         #[serde(default)]
@@ -30,6 +30,12 @@ pub fn run() {
         #[serde(default)]
         auto_refresh_enabled: bool,
         autostart: bool,
+        #[serde(default)]
+        balance_alert_threshold: Option<f64>,
+        #[serde(default)]
+        monthly_budget: Option<f64>,
+        #[serde(default)]
+        hide_on_blur: bool,
     }
 
     #[derive(Debug, Serialize)]
@@ -41,7 +47,15 @@ pub fn run() {
         refresh_interval_seconds: u64,
         auto_refresh_enabled: bool,
         autostart: bool,
+        balance_alert_threshold: Option<f64>,
+        monthly_budget: Option<f64>,
+        hide_on_blur: bool,
         config_path: String,
+    }
+
+    fn http_client() -> &'static reqwest::Client {
+        static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+        HTTP.get_or_init(reqwest::Client::new)
     }
 
     fn config_path() -> Result<PathBuf, String> {
@@ -49,6 +63,113 @@ pub fn run() {
         Ok(PathBuf::from(appdata)
             .join("DeepSeekMonitorWindows")
             .join("config.json"))
+    }
+
+    // ---------- DPAPI 凭据加密：密文绑定当前 Windows 用户，换机/换用户无法解出 ----------
+    const DPAPI_PREFIX: &str = "dpapi:";
+
+    fn dpapi_encrypt(plain: &str) -> Result<String, String> {
+        use base64::Engine;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Cryptography::{
+            CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+        };
+
+        let bytes = plain.as_bytes();
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = unsafe {
+            CryptProtectData(
+                &input,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if ok == 0 {
+            return Err("DPAPI 加密失败".to_string());
+        }
+        let encoded = unsafe {
+            let data = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+            LocalFree(output.pbData as _);
+            encoded
+        };
+        Ok(format!("{DPAPI_PREFIX}{encoded}"))
+    }
+
+    fn dpapi_decrypt(stored: &str) -> Result<String, String> {
+        use base64::Engine;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Cryptography::{
+            CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+        };
+
+        let encoded = stored.strip_prefix(DPAPI_PREFIX).ok_or("不是加密凭据")?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("凭据解码失败：{error}"))?;
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = unsafe {
+            CryptUnprotectData(
+                &input,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if ok == 0 {
+            return Err("DPAPI 解密失败".to_string());
+        }
+        let plain = unsafe {
+            let data = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+            let plain = String::from_utf8_lossy(data).to_string();
+            LocalFree(output.pbData as _);
+            plain
+        };
+        Ok(plain)
+    }
+
+    fn write_stored_config(config: &StoredConfig) -> Result<(), String> {
+        let path = config_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+
+        // 落盘前加密敏感字段；内存中的 config 始终保持明文
+        let mut disk = config.clone();
+        if let Some(value) = disk.api_key.as_deref().filter(|v| !v.is_empty()) {
+            if !value.starts_with(DPAPI_PREFIX) {
+                disk.api_key = Some(dpapi_encrypt(value)?);
+            }
+        }
+        if let Some(value) = disk.usage_token.as_deref().filter(|v| !v.is_empty()) {
+            if !value.starts_with(DPAPI_PREFIX) {
+                disk.usage_token = Some(dpapi_encrypt(value)?);
+            }
+        }
+
+        let text = serde_json::to_string_pretty(&disk).map_err(|error| error.to_string())?;
+        fs::write(path, text).map_err(|error| error.to_string())
     }
 
     fn read_stored_config() -> Result<StoredConfig, String> {
@@ -65,6 +186,25 @@ pub fn run() {
             serde_json::from_str(&text).map_err(|error| error.to_string())?;
         config.refresh_interval_seconds =
             normalize_refresh_interval_seconds(config.refresh_interval_seconds);
+
+        let mut needs_migration = false;
+        for secret in [&mut config.api_key, &mut config.usage_token] {
+            if let Some(value) = secret.as_deref() {
+                if value.starts_with(DPAPI_PREFIX) {
+                    match dpapi_decrypt(value) {
+                        Ok(plain) => *secret = Some(plain),
+                        // 换机/换用户导致解不开：当作未配置，让用户重新录入
+                        Err(_) => *secret = None,
+                    }
+                } else if !value.is_empty() {
+                    // 旧版明文配置，标记迁移为加密存储
+                    needs_migration = true;
+                }
+            }
+        }
+        if needs_migration {
+            let _ = write_stored_config(&config);
+        }
         Ok(config)
     }
 
@@ -73,16 +213,6 @@ pub fn run() {
             60 | 300 | 1800 | 3600 => value,
             _ => 60,
         }
-    }
-
-    fn write_stored_config(config: &StoredConfig) -> Result<(), String> {
-        let path = config_path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-
-        let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
-        fs::write(path, text).map_err(|error| error.to_string())
     }
 
     fn api_key_preview(api_key: &str) -> String {
@@ -124,6 +254,9 @@ pub fn run() {
             refresh_interval_seconds: config.refresh_interval_seconds,
             auto_refresh_enabled: config.auto_refresh_enabled,
             autostart: config.autostart,
+            balance_alert_threshold: config.balance_alert_threshold,
+            monthly_budget: config.monthly_budget,
+            hide_on_blur: config.hide_on_blur,
             config_path: path.to_string_lossy().to_string(),
         })
     }
@@ -207,17 +340,42 @@ pub fn run() {
         to_app_config(config)
     }
 
+    #[tauri::command]
+    fn save_alert_settings(
+        balance_alert_threshold: Option<f64>,
+        monthly_budget: Option<f64>,
+    ) -> Result<AppConfig, String> {
+        let mut config = read_stored_config()?;
+        config.balance_alert_threshold = balance_alert_threshold.filter(|value| *value > 0.0);
+        config.monthly_budget = monthly_budget.filter(|value| *value > 0.0);
+        write_stored_config(&config)?;
+        to_app_config(config)
+    }
+
+    #[tauri::command]
+    fn save_hide_on_blur(hide_on_blur: bool) -> Result<AppConfig, String> {
+        let mut config = read_stored_config()?;
+        config.hide_on_blur = hide_on_blur;
+        write_stored_config(&config)?;
+        to_app_config(config)
+    }
+
     fn apply_autostart(enabled: bool) -> Result<(), String> {
+        use std::os::windows::process::CommandExt;
+        // 不带此标志，GUI 程序派生 reg.exe 会闪现一个控制台黑框
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         let value_name = "DeepSeekMonitorWindows";
 
         if enabled {
             let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-            let exe_arg = exe.to_string_lossy().to_string();
+            // 路径含空格时必须加引号，否则 Run 键按空格截断路径（unquoted path 问题）
+            let exe_arg = format!("\"{}\"", exe.to_string_lossy());
             let status = Command::new("reg")
                 .args(["add", run_key, "/v", value_name, "/t", "REG_SZ", "/d"])
                 .arg(exe_arg)
                 .args(["/f"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .map_err(|error| format!("写入开机自启失败：{error}"))?;
             if !status.success() {
@@ -228,6 +386,7 @@ pub fn run() {
 
         let status = Command::new("reg")
             .args(["delete", run_key, "/v", value_name, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
             .status()
             .map_err(|error| format!("关闭开机自启失败：{error}"))?;
         if !status.success() {
@@ -264,8 +423,7 @@ pub fn run() {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "未配置 API Key".to_string())?;
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = http_client()
             .get("https://api.deepseek.com/user/balance")
             .bearer_auth(&api_key)
             .timeout(std::time::Duration::from_secs(15))
@@ -299,11 +457,16 @@ pub fn run() {
             .await
             .map_err(|error| format!("解析余额数据失败：{error}"))?;
 
-        let info = data
-            .balance_infos
-            .into_iter()
-            .next()
-            .ok_or_else(|| "余额信息为空".to_string())?;
+        // 优先取 CNY，其次取第一条（账户可能同时有 CNY/USD 两条余额）
+        let mut infos = data.balance_infos;
+        if infos.is_empty() {
+            return Err("余额信息为空".to_string());
+        }
+        let index = infos
+            .iter()
+            .position(|info| info.currency == "CNY")
+            .unwrap_or(0);
+        let info = infos.swap_remove(index);
 
         Ok(BalanceResult {
             is_available: data.is_available,
@@ -366,7 +529,7 @@ pub fn run() {
                   (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
         let url =
             format!("https://platform.deepseek.com/api/v0/usage/amount?month={month}&year={year}");
-        let resp = reqwest::Client::new()
+        let resp = http_client()
             .get(&url)
             .bearer_auth(token)
             .header("x-app-version", "1.0.0")
@@ -445,7 +608,9 @@ pub fn run() {
         thread::spawn(move || {
             // 登录页加载并触发平台 API 请求需要时间，等待后再开始扫缓存
             thread::sleep(Duration::from_secs(3));
-            for _ in 0..1200 {
+            // 500ms 一轮 × 3600 ≈ 30 分钟超时。轮询间隔越短，token 在窗口
+            // 标题里的暴露时间越短（读到后立即复原标题）。
+            for _ in 0..3600 {
                 if let Some(token) = find_webview_cached_usage_token() {
                     let _ = capture_usage_token(&app, token);
                     return;
@@ -465,6 +630,8 @@ pub fn run() {
 
                 if let Ok(title) = window.title() {
                     if let Some(rest) = title.strip_prefix(USAGE_TOKEN_TITLE_PREFIX) {
+                        // 立即复原标题，尽量缩短 token 在标题栏/任务切换器可见的时间
+                        let _ = window.eval("document.title = 'DeepSeek 账号登录';");
                         // 注入脚本写入的格式：{year}:{month}:{token}
                         let mut parts = rest.splitn(3, ':');
                         if let (Some(y), Some(m), Some(tok)) =
@@ -485,7 +652,7 @@ pub fn run() {
                     }
                 }
 
-                thread::sleep(Duration::from_millis(1500));
+                thread::sleep(Duration::from_millis(500));
             }
             // 30 分钟超时，若仍未成功则通知前端结束等待
             let captured = app
@@ -499,35 +666,22 @@ pub fn run() {
     }
 
     // 在登录窗口注入，hook fetch / XMLHttpRequest，主动从平台 API 请求的
-    // Authorization 头里抓 Bearer token。登录后页面自动调 API 即可即时捕获，
-    // 不再依赖 WebView2 磁盘缓存的延迟落盘。
+    // Authorization 头里抓 Bearer token，写入 document.title 供原生侧轮询读取。
+    // 远程页面不暴露任何 Tauri IPC（capability 已不覆盖 login-sync 窗口），
+    // title 是唯一的回传通道，原生侧读到后会立即复原标题。
     const USAGE_SYNC_POLL_JS: &str = r#"
     (function() {
       if (window.__dsm_token_hook__) return;
       window.__dsm_token_hook__ = true;
-      var done = false;
-      var pending = false;
 
       function deliver(token) {
-        if (done) return;
         if (!token || typeof token !== 'string') return;
         token = token.trim();
         if (token.length < 20) return;
         var now = new Date();
         var y = now.getFullYear();
         var m = now.getMonth() + 1;
-        // 主通道：写入 document.title，原生侧 window.title() 读取。
-        // 外部网站窗口默认不注入 __TAURI__，此通道不依赖它，最可靠。
         try { document.title = 'DSM_USAGE_TOKEN:' + y + ':' + m + ':' + token; } catch (e) {}
-        // 辅通道：若本窗口恰好可用 __TAURI__，直接上报更快
-        try {
-          if (!pending && window.__TAURI__ && window.__TAURI__.core) {
-            pending = true;
-            window.__TAURI__.core.invoke('usage_token_captured', {
-              token: token, month: m, year: y
-            }).then(function() { done = true; }).catch(function() { pending = false; });
-          }
-        } catch (e) {}
       }
 
       function fromAuth(value) {
@@ -594,50 +748,29 @@ pub fn run() {
         }
 
         let url = tauri::WebviewUrl::External("https://platform.deepseek.com".parse().unwrap());
-        tauri::WebviewWindowBuilder::new(
-            &app,
-            "login-sync",
-            url,
-        )
-        .title("DeepSeek 账号登录")
-        .inner_size(480.0, 720.0)
-        .min_inner_size(360.0, 480.0)
-        .resizable(true)
-        .center()
-        .visible(true)
-        .initialization_script(USAGE_SYNC_POLL_JS)
-        .on_page_load(|window, payload| {
-            if matches!(payload.event(), PageLoadEvent::Finished)
-                && payload
-                    .url()
-                    .host_str()
-                    .is_some_and(|host| host == "platform.deepseek.com")
-            {
-                // 双保险：万一 initialization_script 未注入，页面加载完再装一次 hook
-                let _ = window.eval(USAGE_SYNC_POLL_JS);
-            }
-        })
-        .build()
-        .map_err(|error| format!("打开登录窗口失败：{error}"))?;
+        tauri::WebviewWindowBuilder::new(&app, "login-sync", url)
+            .title("DeepSeek 账号登录")
+            .inner_size(480.0, 720.0)
+            .min_inner_size(360.0, 480.0)
+            .resizable(true)
+            .center()
+            .visible(true)
+            .initialization_script(USAGE_SYNC_POLL_JS)
+            .on_page_load(|window, payload| {
+                if matches!(payload.event(), PageLoadEvent::Finished)
+                    && payload
+                        .url()
+                        .host_str()
+                        .is_some_and(|host| host == "platform.deepseek.com")
+                {
+                    // 双保险：万一 initialization_script 未注入，页面加载完再装一次 hook
+                    let _ = window.eval(USAGE_SYNC_POLL_JS);
+                }
+            })
+            .build()
+            .map_err(|error| format!("打开登录窗口失败：{error}"))?;
         start_usage_title_watcher(app);
         Ok(false)
-    }
-
-    #[tauri::command]
-    async fn usage_token_captured(
-        app: tauri::AppHandle,
-        token: String,
-        month: u32,
-        year: u32,
-    ) -> Result<AppConfig, String> {
-        let value = token.trim().to_string();
-        if value.is_empty() {
-            return Err("用量 Token 为空".to_string());
-        }
-        // 先验证再保存：拦截到的 token 可能是登录中途的临时 token，
-        // 只有能真正调用用量接口的才接受
-        verify_usage_token(&value, month, year).await?;
-        capture_usage_token(&app, value)
     }
 
     #[derive(Debug, Serialize)]
@@ -655,18 +788,21 @@ pub fn run() {
 
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
+    struct DayModelBreakdown {
+        tokens: u64,
+        cache_hit: u64,
+        cache_miss: u64,
+        response: u64,
+        cost: f64,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct UsageDaySummary {
         date: String,
-        flash_tokens: u64,
-        flash_cache_hit: u64,
-        flash_cache_miss: u64,
-        flash_response: u64,
-        pro_tokens: u64,
-        pro_cache_hit: u64,
-        pro_cache_miss: u64,
-        pro_response: u64,
         total_tokens: u64,
         total_cost: f64,
+        models: std::collections::HashMap<String, DayModelBreakdown>,
     }
 
     #[derive(Debug, Serialize)]
@@ -677,9 +813,27 @@ pub fn run() {
         month_cost: f64,
     }
 
+    fn model_display_name(model: &str) -> String {
+        match model {
+            "deepseek-v4-flash" => "V4 Flash".to_string(),
+            "deepseek-v4-pro" => "V4 Pro".to_string(),
+            "deepseek-chat" => "Chat".to_string(),
+            "deepseek-reasoner" => "Reasoner".to_string(),
+            other => other.strip_prefix("deepseek-").unwrap_or(other).to_string(),
+        }
+    }
+
+    fn model_priority(model: &str) -> u8 {
+        match model {
+            "deepseek-v4-flash" => 0,
+            "deepseek-v4-pro" => 1,
+            _ => 2,
+        }
+    }
+
     // 通过 DeepSeek 平台内部接口拉取用量与费用（需网页登录 token，非官方 API Key）。
-    #[tauri::command]
-    async fn fetch_usage(month: u32, year: u32) -> Result<UsageResult, String> {
+    // 动态返回接口中出现的所有模型，不再硬编码 flash/pro。
+    async fn load_usage(month: u32, year: u32) -> Result<UsageResult, String> {
         let config = read_stored_config()?;
         let token = config
             .usage_token
@@ -795,14 +949,14 @@ pub fn run() {
                 .sum()
         }
 
-        let client = reqwest::Client::new();
+        let client = http_client();
         let amount_url =
             format!("https://platform.deepseek.com/api/v0/usage/amount?month={month}&year={year}");
         let cost_url =
             format!("https://platform.deepseek.com/api/v0/usage/cost?month={month}&year={year}");
 
-        let amount: AmountResp = get_json(&client, &amount_url, &token).await?;
-        let cost: CostResp = get_json(&client, &cost_url, &token).await?;
+        let amount: AmountResp = get_json(client, &amount_url, &token).await?;
+        let cost: CostResp = get_json(client, &cost_url, &token).await?;
 
         let cost_total = cost.data.biz_data.first();
         let cost_for_model = |model: &str| -> f64 {
@@ -814,77 +968,70 @@ pub fn run() {
 
         let mut models = Vec::new();
         for model_usage in &amount.data.biz_data.total {
-            let label = match model_usage.model.as_str() {
-                "deepseek-v4-flash" => Some(("flash", "V4 Flash")),
-                "deepseek-v4-pro" => Some(("pro", "V4 Pro")),
-                _ => None,
-            };
-            if let Some((key, name)) = label {
-                let (total, request, hit, miss, response) = token_breakdown(&model_usage.usage);
-                models.push(UsageModelSummary {
-                    key: key.to_string(),
-                    name: name.to_string(),
-                    total_tokens: total,
-                    request_count: request,
-                    cache_hit_tokens: hit,
-                    cache_miss_tokens: miss,
-                    response_tokens: response,
-                    cost: cost_for_model(&model_usage.model),
-                });
-            }
+            let (total, request, hit, miss, response) = token_breakdown(&model_usage.usage);
+            models.push(UsageModelSummary {
+                key: model_usage.model.clone(),
+                name: model_display_name(&model_usage.model),
+                total_tokens: total,
+                request_count: request,
+                cache_hit_tokens: hit,
+                cache_miss_tokens: miss,
+                response_tokens: response,
+                cost: cost_for_model(&model_usage.model),
+            });
         }
+        models.sort_by(|a, b| {
+            model_priority(&a.key).cmp(&model_priority(&b.key)).then(
+                b.cost
+                    .partial_cmp(&a.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
 
+        // (日期, 模型) -> 当日该模型费用；日期 -> 当日总费用
         let mut cost_by_date: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        let mut cost_by_date_model: std::collections::HashMap<(String, String), f64> =
             std::collections::HashMap::new();
         if let Some(item) = cost_total {
             for day in &item.days {
-                let day_cost: f64 = day.data.iter().map(|m| cost_sum(&m.usage)).sum();
+                let mut day_cost = 0.0;
+                for model_usage in &day.data {
+                    let value = cost_sum(&model_usage.usage);
+                    day_cost += value;
+                    cost_by_date_model
+                        .insert((day.date.clone(), model_usage.model.clone()), value);
+                }
                 cost_by_date.insert(day.date.clone(), day_cost);
             }
         }
 
         let mut days = Vec::new();
         for day in &amount.data.biz_data.days {
-            let mut flash = 0u64;
-            let mut flash_hit = 0u64;
-            let mut flash_miss = 0u64;
-            let mut flash_resp = 0u64;
-            let mut pro = 0u64;
-            let mut pro_hit = 0u64;
-            let mut pro_miss = 0u64;
-            let mut pro_resp = 0u64;
             let mut total = 0u64;
+            let mut day_models = std::collections::HashMap::new();
             for model_usage in &day.data {
                 let (tokens, _, hit, miss, response) = token_breakdown(&model_usage.usage);
                 total += tokens;
-                match model_usage.model.as_str() {
-                    "deepseek-v4-flash" => {
-                        flash += tokens;
-                        flash_hit += hit;
-                        flash_miss += miss;
-                        flash_resp += response;
-                    }
-                    "deepseek-v4-pro" => {
-                        pro += tokens;
-                        pro_hit += hit;
-                        pro_miss += miss;
-                        pro_resp += response;
-                    }
-                    _ => {}
-                }
+                day_models.insert(
+                    model_usage.model.clone(),
+                    DayModelBreakdown {
+                        tokens,
+                        cache_hit: hit,
+                        cache_miss: miss,
+                        response,
+                        cost: cost_by_date_model
+                            .get(&(day.date.clone(), model_usage.model.clone()))
+                            .copied()
+                            .unwrap_or(0.0),
+                    },
+                );
             }
             days.push(UsageDaySummary {
                 date: day.date.clone(),
-                flash_tokens: flash,
-                flash_cache_hit: flash_hit,
-                flash_cache_miss: flash_miss,
-                flash_response: flash_resp,
-                pro_tokens: pro,
-                pro_cache_hit: pro_hit,
-                pro_cache_miss: pro_miss,
-                pro_response: pro_resp,
                 total_tokens: total,
                 total_cost: cost_by_date.get(&day.date).copied().unwrap_or(0.0),
+                models: day_models,
             });
         }
 
@@ -899,6 +1046,73 @@ pub fn run() {
         })
     }
 
+    #[tauri::command]
+    async fn fetch_usage(month: u32, year: u32) -> Result<UsageResult, String> {
+        load_usage(month, year).await
+    }
+
+    // 导出指定月份的逐日逐模型用量到 CSV（带 BOM，Excel 可直接打开中文）。
+    #[tauri::command]
+    async fn export_usage_csv(month: u32, year: u32) -> Result<String, String> {
+        let usage = load_usage(month, year).await?;
+        let mut csv =
+            String::from("\u{FEFF}日期,模型,总Tokens,缓存命中,缓存未命中,输出Tokens,费用(元)\n");
+        for day in &usage.days {
+            let mut keys: Vec<&String> = day.models.keys().collect();
+            keys.sort();
+            for key in keys {
+                let m = &day.models[key];
+                csv.push_str(&format!(
+                    "{},{},{},{},{},{},{:.4}\n",
+                    day.date, key, m.tokens, m.cache_hit, m.cache_miss, m.response, m.cost
+                ));
+            }
+        }
+        for model in &usage.models {
+            csv.push_str(&format!(
+                "本月合计,{},{},{},{},{},{:.4}\n",
+                model.key,
+                model.total_tokens,
+                model.cache_hit_tokens,
+                model.cache_miss_tokens,
+                model.response_tokens,
+                model.cost
+            ));
+        }
+
+        let home = std::env::var_os("USERPROFILE").ok_or("USERPROFILE 不可用")?;
+        let dir = PathBuf::from(home).join("Downloads");
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let path = dir.join(format!("deepseek-usage-{year}-{month:02}.csv"));
+        fs::write(&path, csv).map_err(|error| format!("写入 CSV 失败：{error}"))?;
+        Ok(path.to_string_lossy().to_string())
+    }
+
+    // 发送 Windows 系统通知（低余额、超预算提醒由前端判断后调用）。
+    #[tauri::command]
+    fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+        use tauri_plugin_notification::NotificationExt;
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|error| error.to_string())
+    }
+
+    struct TrayHandle(Mutex<Option<TrayIcon>>);
+
+    // 更新托盘图标悬停提示（余额/今日消耗），让用户不开窗口也能看到概况。
+    #[tauri::command]
+    fn set_tray_tooltip(state: tauri::State<'_, TrayHandle>, text: String) -> Result<(), String> {
+        let guard = state.0.lock().map_err(|_| "托盘状态不可用".to_string())?;
+        if let Some(tray) = guard.as_ref() {
+            tray.set_tooltip(Some(text.as_str()))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     tauri::Builder::default()
         // 单实例守卫：必须作为第一个注册的插件。
         // 程序已运行时再次启动 exe，第二个进程不会新开窗口，
@@ -908,6 +1122,7 @@ pub fn run() {
                 show_main_window(&window);
             }
         }))
+        .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             hide_main_window,
@@ -916,13 +1131,17 @@ pub fn run() {
             clear_api_key,
             save_refresh_interval,
             save_auto_refresh_enabled,
+            save_alert_settings,
+            save_hide_on_blur,
             save_autostart,
             fetch_balance,
             save_usage_token,
             clear_usage_token,
             fetch_usage,
+            export_usage_csv,
             start_usage_sync,
-            usage_token_captured
+            set_tray_tooltip,
+            notify
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -939,6 +1158,7 @@ pub fn run() {
 
             let mut tray_builder = TrayIconBuilder::new()
                 .menu(&tray_menu)
+                .tooltip("DeepSeek Monitor")
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
@@ -975,7 +1195,8 @@ pub fn run() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
 
-            tray_builder.build(app)?;
+            let tray = tray_builder.build(app)?;
+            app.manage(TrayHandle(Mutex::new(Some(tray))));
             Ok(())
         })
         .run(tauri::generate_context!())

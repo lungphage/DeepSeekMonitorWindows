@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DeepSeekMonitorWindows",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "identifier": "com.deepseek.monitor.windows",
   "build": {
     "frontendDist": "../dist",
@@ -10,13 +10,13 @@
     "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/build.ps1"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",
         "title": "DeepSeek Monitor Windows",
         "width": 356,
-        "height": 600,
+        "height": 648,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,
@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
