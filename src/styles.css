@@ -600,6 +600,43 @@ button {
   letter-spacing: 2px;
 }
 
+/* 多 API Key 列表 */
+.key-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.key-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 7px;
+  background: rgba(24, 23, 19, 0.5);
+  font-size: 12px;
+}
+
+.key-list-name {
+  color: rgba(var(--fg), 0.92);
+  font-weight: 700;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-list-preview {
+  flex: 1;
+  color: rgba(var(--fg), 0.55);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .key-row button,
 .secondary,
 .back-button {
@@ -1210,6 +1247,10 @@ button:disabled {
   border-color: rgba(40, 70, 100, 0.18);
   background: rgba(255, 255, 255, 0.72);
   color: #1a2a40;
+}
+[data-theme="light"] .key-list-row {
+  border-color: rgba(40, 70, 100, 0.18);
+  background: rgba(255, 255, 255, 0.55);
 }
 [data-theme="light"] .configured {
   color: #16a34a;

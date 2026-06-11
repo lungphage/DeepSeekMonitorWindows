@@ -2,7 +2,13 @@
 
 基于 [Joyi-code/DeepSeekMonitorWindows](https://github.com/Joyi-code/DeepSeekMonitorWindows) 的增强版本，Windows 桌面端 DeepSeek API 用量监控工具。
 
-## 本次 Fork 更新内容 (v1.2.0)
+## 更新内容 (v1.3.0)
+
+### 功能新增
+- **多 API Key 支持**：可添加多个不同账号的 API Key（带备注名），主面板显示合并总余额及各 Key 余额明细；新 Key 验证通过后才保存，旧版单 Key 配置自动迁移
+- **下线旧模型名统计**：官方即将删除 `deepseek-chat` / `deepseek-reasoner` 旧模型名，这两个条目不再计入模型列表、趋势图和消费合计
+
+## 历史更新 (v1.2.0)
 
 ### 功能新增
 - **动态模型支持**：自动展示所有返回的模型，新模型自动配色
@@ -38,7 +44,7 @@
 ## 快速开始
 
 ### 直接安装
-下载 Release 中的 `DeepSeekMonitorWindows_1.2.0_x64-setup.exe` 安装即可。
+下载 Release 中的 `DeepSeekMonitorWindows_1.3.0_x64-setup.exe` 安装即可。
 
 ### 从源码构建
 ```powershell

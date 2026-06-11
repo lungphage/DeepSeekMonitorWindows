@@ -33,9 +33,13 @@ import "./styles.css";
 
 type ViewName = "dashboard" | "settings" | "detail";
 type ThemeMode = "dark" | "light" | "system";
+type ApiKeyInfo = {
+  name: string;
+  preview: string;
+};
 type AppConfig = {
   apiKeyConfigured: boolean;
-  apiKeyPreview: string | null;
+  apiKeys: ApiKeyInfo[];
   usageTokenConfigured: boolean;
   refreshIntervalSeconds: number;
   autoRefreshEnabled: boolean;
@@ -45,12 +49,22 @@ type AppConfig = {
   hideOnBlur: boolean;
   configPath: string;
 };
+type AccountBalance = {
+  name: string;
+  isAvailable: boolean;
+  currency: string;
+  totalBalance: string;
+  grantedBalance: string;
+  toppedUpBalance: string;
+  error: string | null;
+};
 type BalanceData = {
   isAvailable: boolean;
   currency: string;
   totalBalance: string;
   grantedBalance: string;
   toppedUpBalance: string;
+  accounts: AccountBalance[];
 };
 type BalanceState = "loading" | "ok" | "error" | "nokey";
 
@@ -419,6 +433,7 @@ function App() {
       )}
       {view === "settings" && (
         <SettingsPanel
+          onBalanceChanged={loadBalance}
           onUsageLoaded={(nextUsage) => {
             setUsage(nextUsage);
             setUsageState("ok");
@@ -645,9 +660,24 @@ function BalanceCard({
       <div className={`balance-amount ${state !== "ok" ? "balance-dim" : ""}`}>{amount}</div>
       {state === "ok" && balance && (
         <p className="balance-breakdown">
-          充值 {symbol}
-          {balance.toppedUpBalance} · 赠金 {symbol}
-          {balance.grantedBalance}
+          {balance.accounts.length > 1 ? (
+            // 多 Key 时逐个列出各 Key 余额，替代充值/赠金拆分
+            balance.accounts.map((account, index) => (
+              <React.Fragment key={`${account.name}-${index}`}>
+                {index > 0 && " · "}
+                {account.name}{" "}
+                {account.error
+                  ? "查询失败"
+                  : `${account.currency === "USD" ? "$" : "¥"}${account.totalBalance}`}
+              </React.Fragment>
+            ))
+          ) : (
+            <>
+              充值 {symbol}
+              {balance.toppedUpBalance} · 赠金 {symbol}
+              {balance.grantedBalance}
+            </>
+          )}
           {forecastDays != null && avg7 != null && (
             <> · 日均 {fmtMoney(avg7)} 约可用 {forecastDays} 天</>
           )}
@@ -891,16 +921,19 @@ function UsageChart({
 
 function SettingsPanel({
   onBack,
+  onBalanceChanged,
   onUsageLoaded,
   onUsageCleared,
   onConfigChanged,
 }: {
   onBack: () => void;
+  onBalanceChanged: () => void;
   onUsageLoaded: (usage: UsageResult) => void;
   onUsageCleared: () => void;
   onConfigChanged: (config: AppConfig) => void;
 }) {
   const [apiKey, setApiKey] = React.useState("");
+  const [keyName, setKeyName] = React.useState("");
   const [config, setConfig] = React.useState<AppConfig | null>(null);
   const [status, setStatus] = React.useState("正在读取本地配置");
   const [busy, setBusy] = React.useState(false);
@@ -936,7 +969,7 @@ function SettingsPanel({
         setHideOnBlur(nextConfig.hideOnBlur);
         setAlertInput(nextConfig.balanceAlertThreshold != null ? String(nextConfig.balanceAlertThreshold) : "");
         setBudgetInput(nextConfig.monthlyBudget != null ? String(nextConfig.monthlyBudget) : "");
-        setStatus(nextConfig.apiKeyConfigured ? `已配置 ${nextConfig.apiKeyPreview}` : "未配置 API Key");
+        setStatus(nextConfig.apiKeyConfigured ? `已配置 ${nextConfig.apiKeys.length} 个 API Key` : "未配置 API Key");
         setUsageStatus(nextConfig.usageTokenConfigured ? "用量 Token 已配置" : "未配置用量 Token");
       })
       .catch(() => {
@@ -989,39 +1022,44 @@ function SettingsPanel({
     };
   }, []);
 
+  // 后端验证通过才会保存，保存成功后刷新主面板余额
   const saveApiKey = React.useCallback(() => {
     setBusy(true);
-    void invoke<AppConfig>("save_api_key", { apiKey })
+    setStatus("正在验证 Key…");
+    void invoke<AppConfig>("save_api_key", { name: keyName.trim() || null, apiKey })
       .then((nextConfig) => {
         adoptConfig(nextConfig);
         setApiKey("");
-        setStatus("已保存，正在验证 Key…");
-        return invoke<BalanceData>("fetch_balance");
-      })
-      .then((balance) => {
-        const symbol = balance.currency === "USD" ? "$" : "¥";
-        const tip = balance.isAvailable ? "" : "（余额不足）";
-        setStatus(`验证通过，当前余额 ${symbol}${balance.totalBalance}${tip}`);
+        setKeyName("");
+        setStatus(`验证通过，已配置 ${nextConfig.apiKeys.length} 个 API Key`);
+        onBalanceChanged();
       })
       .catch((error) => {
         setStatus(typeof error === "string" ? error : "保存或验证失败");
       })
       .finally(() => setBusy(false));
-  }, [adoptConfig, apiKey]);
+  }, [adoptConfig, apiKey, keyName, onBalanceChanged]);
 
-  const clearApiKey = React.useCallback(() => {
-    setBusy(true);
-    void invoke<AppConfig>("clear_api_key")
-      .then((nextConfig) => {
-        adoptConfig(nextConfig);
-        setApiKey("");
-        setStatus("已清除 API Key");
-      })
-      .catch((error) => {
-        setStatus(typeof error === "string" ? error : "清除失败");
-      })
-      .finally(() => setBusy(false));
-  }, [adoptConfig]);
+  const removeApiKey = React.useCallback(
+    (index: number) => {
+      setBusy(true);
+      void invoke<AppConfig>("remove_api_key", { index })
+        .then((nextConfig) => {
+          adoptConfig(nextConfig);
+          setStatus(
+            nextConfig.apiKeys.length > 0
+              ? `已删除，剩余 ${nextConfig.apiKeys.length} 个 API Key`
+              : "已清除全部 API Key",
+          );
+          onBalanceChanged();
+        })
+        .catch((error) => {
+          setStatus(typeof error === "string" ? error : "删除失败");
+        })
+        .finally(() => setBusy(false));
+    },
+    [adoptConfig, onBalanceChanged],
+  );
 
   const startUsageSync = React.useCallback(() => {
     setUsageSyncing(true);
@@ -1175,33 +1213,57 @@ function SettingsPanel({
         </header>
 
         <SettingsSection icon={<KeyRound size={15} />} title="API Key">
-          <p>用于调用 DeepSeek API 获取余额和用量数据。当前 Windows 版本会保存在应用本地设置中。</p>
+          <p>用于调用 DeepSeek API 获取余额。可添加多个不同账号的 Key，主面板余额合并显示。</p>
           <p className="muted">API Key 经 Windows DPAPI 加密后只在当前这台电脑本地保留。</p>
           <p className="muted config-path">
             <span>本地位置：</span>
             <span>{configPath}</span>
           </p>
+          {(config?.apiKeys ?? []).length > 0 && (
+            <div className="key-list">
+              {(config?.apiKeys ?? []).map((item, index) => (
+                <div className="key-list-row" key={`${item.preview}-${index}`}>
+                  <span className="key-list-name">{item.name}</span>
+                  <span className="key-list-preview">{item.preview}</span>
+                  <button
+                    className="secondary"
+                    onClick={() => removeApiKey(index)}
+                    disabled={busy}
+                    aria-label={`删除 ${item.name}`}
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="key-row">
+            <input
+              aria-label="Key 名称"
+              value={keyName}
+              placeholder="名称（可选，如：账号 A）"
+              onChange={(event) => setKeyName(event.target.value)}
+            />
+          </div>
           <div className="key-row">
             <input
               aria-label="API Key"
               type="password"
               value={apiKey}
-              placeholder={config?.apiKeyConfigured ? "••••••••••••••••••••••••••••••••••••••••••••••••••" : "sk-..."}
+              placeholder="sk-..."
               onChange={(event) => setApiKey(event.target.value)}
             />
           </div>
           <div className="settings-actions">
             <button className="primary" onClick={saveApiKey} disabled={busy || !apiKey.trim()}>
-              验证并保存
+              验证并添加
             </button>
             <span className={config?.apiKeyConfigured ? "configured" : "configured muted-status"}>
               <CheckCircle2 size={17} />
-              {config?.apiKeyConfigured ? "已配置" : "未配置"}
+              {config?.apiKeyConfigured ? `已配置 ${config?.apiKeys.length} 个` : "未配置"}
             </span>
-            <button className="secondary" onClick={clearApiKey} disabled={busy || !config?.apiKeyConfigured}>
-              清除 Key
-            </button>
           </div>
+          <p className="muted">{status}</p>
         </SettingsSection>
 
         <SettingsSection icon={<BarChart3 size={15} />} title="用量同步 Token">

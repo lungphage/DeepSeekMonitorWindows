@@ -22,8 +22,18 @@ pub fn run() {
     };
 
     #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+    struct StoredApiKey {
+        #[serde(default)]
+        name: String,
+        key: String,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize, Serialize)]
     struct StoredConfig {
+        // 旧版单 Key 字段，仅用于读取迁移；新配置写入 api_keys
         api_key: Option<String>,
+        #[serde(default)]
+        api_keys: Vec<StoredApiKey>,
         #[serde(default)]
         usage_token: Option<String>,
         refresh_interval_seconds: u64,
@@ -40,9 +50,16 @@ pub fn run() {
 
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
+    struct ApiKeyInfo {
+        name: String,
+        preview: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct AppConfig {
         api_key_configured: bool,
-        api_key_preview: Option<String>,
+        api_keys: Vec<ApiKeyInfo>,
         usage_token_configured: bool,
         refresh_interval_seconds: u64,
         auto_refresh_enabled: bool,
@@ -162,6 +179,11 @@ pub fn run() {
                 disk.api_key = Some(dpapi_encrypt(value)?);
             }
         }
+        for entry in &mut disk.api_keys {
+            if !entry.key.is_empty() && !entry.key.starts_with(DPAPI_PREFIX) {
+                entry.key = dpapi_encrypt(&entry.key)?;
+            }
+        }
         if let Some(value) = disk.usage_token.as_deref().filter(|v| !v.is_empty()) {
             if !value.starts_with(DPAPI_PREFIX) {
                 disk.usage_token = Some(dpapi_encrypt(value)?);
@@ -202,6 +224,27 @@ pub fn run() {
                 }
             }
         }
+        for entry in &mut config.api_keys {
+            if entry.key.starts_with(DPAPI_PREFIX) {
+                match dpapi_decrypt(&entry.key) {
+                    Ok(plain) => entry.key = plain,
+                    Err(_) => entry.key = String::new(),
+                }
+            } else if !entry.key.is_empty() {
+                needs_migration = true;
+            }
+        }
+        config.api_keys.retain(|entry| !entry.key.is_empty());
+        // 旧版单 Key 配置迁移进 api_keys 列表
+        if let Some(legacy) = config.api_key.take().filter(|value| !value.is_empty()) {
+            if config.api_keys.is_empty() {
+                config.api_keys.push(StoredApiKey {
+                    name: "Key 1".to_string(),
+                    key: legacy,
+                });
+            }
+            needs_migration = true;
+        }
         if needs_migration {
             let _ = write_stored_config(&config);
         }
@@ -235,11 +278,14 @@ pub fn run() {
 
     fn to_app_config(config: StoredConfig) -> Result<AppConfig, String> {
         let path = config_path()?;
-        let api_key_preview = config
-            .api_key
-            .as_ref()
-            .filter(|value| !value.is_empty())
-            .map(|value| api_key_preview(value));
+        let api_keys: Vec<ApiKeyInfo> = config
+            .api_keys
+            .iter()
+            .map(|entry| ApiKeyInfo {
+                name: entry.name.clone(),
+                preview: api_key_preview(&entry.key),
+            })
+            .collect();
 
         let usage_token_configured = config
             .usage_token
@@ -248,8 +294,8 @@ pub fn run() {
             .unwrap_or(false);
 
         Ok(AppConfig {
-            api_key_configured: api_key_preview.is_some(),
-            api_key_preview,
+            api_key_configured: !api_keys.is_empty(),
+            api_keys,
             usage_token_configured,
             refresh_interval_seconds: config.refresh_interval_seconds,
             auto_refresh_enabled: config.auto_refresh_enabled,
@@ -302,23 +348,36 @@ pub fn run() {
         to_app_config(read_stored_config()?)
     }
 
+    // 验证通过后才保存；名称留空时自动编号
     #[tauri::command]
-    fn save_api_key(api_key: String) -> Result<AppConfig, String> {
+    async fn save_api_key(name: Option<String>, api_key: String) -> Result<AppConfig, String> {
         let value = api_key.trim().to_string();
         if value.is_empty() {
             return Err("API Key 不能为空".to_string());
         }
 
         let mut config = read_stored_config()?;
-        config.api_key = Some(value);
+        if config.api_keys.iter().any(|entry| entry.key == value) {
+            return Err("该 API Key 已添加".to_string());
+        }
+        fetch_balance_for_key(value.clone()).await?;
+
+        let name = name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("Key {}", config.api_keys.len() + 1));
+        config.api_keys.push(StoredApiKey { name, key: value });
         write_stored_config(&config)?;
         to_app_config(config)
     }
 
     #[tauri::command]
-    fn clear_api_key() -> Result<AppConfig, String> {
+    fn remove_api_key(index: usize) -> Result<AppConfig, String> {
         let mut config = read_stored_config()?;
-        config.api_key = None;
+        if index >= config.api_keys.len() {
+            return Err("要删除的 API Key 不存在".to_string());
+        }
+        config.api_keys.remove(index);
         write_stored_config(&config)?;
         to_app_config(config)
     }
@@ -404,6 +463,18 @@ pub fn run() {
         to_app_config(config)
     }
 
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AccountBalance {
+        name: String,
+        is_available: bool,
+        currency: String,
+        total_balance: String,
+        granted_balance: String,
+        topped_up_balance: String,
+        error: Option<String>,
+    }
+
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct BalanceResult {
@@ -412,17 +483,19 @@ pub fn run() {
         total_balance: String,
         granted_balance: String,
         topped_up_balance: String,
+        accounts: Vec<AccountBalance>,
     }
 
-    // 实时查询 DeepSeek 账户余额。DeepSeek 官方仅提供余额接口，无用量接口。
-    #[tauri::command]
-    async fn fetch_balance() -> Result<BalanceResult, String> {
-        let config = read_stored_config()?;
-        let api_key = config
-            .api_key
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "未配置 API Key".to_string())?;
+    struct SingleBalance {
+        is_available: bool,
+        currency: String,
+        total_balance: String,
+        granted_balance: String,
+        topped_up_balance: String,
+    }
 
+    // 查询单个 API Key 的账户余额。DeepSeek 官方仅提供余额接口，无用量接口。
+    async fn fetch_balance_for_key(api_key: String) -> Result<SingleBalance, String> {
         let response = http_client()
             .get("https://api.deepseek.com/user/balance")
             .bearer_auth(&api_key)
@@ -468,12 +541,88 @@ pub fn run() {
             .unwrap_or(0);
         let info = infos.swap_remove(index);
 
-        Ok(BalanceResult {
+        Ok(SingleBalance {
             is_available: data.is_available,
             currency: info.currency,
             total_balance: info.total_balance,
             granted_balance: info.granted_balance,
             topped_up_balance: info.topped_up_balance,
+        })
+    }
+
+    // 并发查询所有已配置 Key 的余额，返回聚合值 + 各 Key 明细。
+    // 聚合金额直接按数值求和，币种取第一个成功账户的币种（多 Key 混用 CNY/USD 时仅作展示参考）。
+    #[tauri::command]
+    async fn fetch_balance() -> Result<BalanceResult, String> {
+        let config = read_stored_config()?;
+        if config.api_keys.is_empty() {
+            return Err("未配置 API Key".to_string());
+        }
+
+        let handles: Vec<_> = config
+            .api_keys
+            .iter()
+            .map(|entry| {
+                let name = entry.name.clone();
+                let key = entry.key.clone();
+                (
+                    name,
+                    tauri::async_runtime::spawn(fetch_balance_for_key(key)),
+                )
+            })
+            .collect();
+
+        let mut accounts = Vec::new();
+        for (name, handle) in handles {
+            let result = handle
+                .await
+                .unwrap_or_else(|error| Err(format!("余额查询失败：{error}")));
+            accounts.push(match result {
+                Ok(balance) => AccountBalance {
+                    name,
+                    is_available: balance.is_available,
+                    currency: balance.currency,
+                    total_balance: balance.total_balance,
+                    granted_balance: balance.granted_balance,
+                    topped_up_balance: balance.topped_up_balance,
+                    error: None,
+                },
+                Err(error) => AccountBalance {
+                    name,
+                    is_available: false,
+                    currency: String::new(),
+                    total_balance: "0.00".to_string(),
+                    granted_balance: "0.00".to_string(),
+                    topped_up_balance: "0.00".to_string(),
+                    error: Some(error),
+                },
+            });
+        }
+
+        let succeeded: Vec<&AccountBalance> =
+            accounts.iter().filter(|item| item.error.is_none()).collect();
+        if succeeded.is_empty() {
+            return Err(accounts
+                .first()
+                .and_then(|item| item.error.clone())
+                .unwrap_or_else(|| "余额查询失败".to_string()));
+        }
+
+        let sum = |pick: fn(&AccountBalance) -> &str| -> String {
+            let total: f64 = succeeded
+                .iter()
+                .map(|item| pick(item).parse::<f64>().unwrap_or(0.0))
+                .sum();
+            format!("{total:.2}")
+        };
+
+        Ok(BalanceResult {
+            is_available: succeeded.iter().any(|item| item.is_available),
+            currency: succeeded[0].currency.clone(),
+            total_balance: sum(|item| &item.total_balance),
+            granted_balance: sum(|item| &item.granted_balance),
+            topped_up_balance: sum(|item| &item.topped_up_balance),
+            accounts,
         })
     }
 
@@ -817,10 +966,13 @@ pub fn run() {
         match model {
             "deepseek-v4-flash" => "V4 Flash".to_string(),
             "deepseek-v4-pro" => "V4 Pro".to_string(),
-            "deepseek-chat" => "Chat".to_string(),
-            "deepseek-reasoner" => "Reasoner".to_string(),
             other => other.strip_prefix("deepseek-").unwrap_or(other).to_string(),
         }
+    }
+
+    // 官方将下线 deepseek-chat / deepseek-reasoner 旧模型名，这两个条目不再统计
+    fn is_retired_model(model: &str) -> bool {
+        matches!(model, "deepseek-chat" | "deepseek-reasoner")
     }
 
     fn model_priority(model: &str) -> u8 {
@@ -968,6 +1120,9 @@ pub fn run() {
 
         let mut models = Vec::new();
         for model_usage in &amount.data.biz_data.total {
+            if is_retired_model(&model_usage.model) {
+                continue;
+            }
             let (total, request, hit, miss, response) = token_breakdown(&model_usage.usage);
             models.push(UsageModelSummary {
                 key: model_usage.model.clone(),
@@ -997,6 +1152,9 @@ pub fn run() {
             for day in &item.days {
                 let mut day_cost = 0.0;
                 for model_usage in &day.data {
+                    if is_retired_model(&model_usage.model) {
+                        continue;
+                    }
                     let value = cost_sum(&model_usage.usage);
                     day_cost += value;
                     cost_by_date_model
@@ -1011,6 +1169,9 @@ pub fn run() {
             let mut total = 0u64;
             let mut day_models = std::collections::HashMap::new();
             for model_usage in &day.data {
+                if is_retired_model(&model_usage.model) {
+                    continue;
+                }
                 let (tokens, _, hit, miss, response) = token_breakdown(&model_usage.usage);
                 total += tokens;
                 day_models.insert(
@@ -1036,7 +1197,13 @@ pub fn run() {
         }
 
         let month_cost: f64 = cost_total
-            .map(|item| item.total.iter().map(|m| cost_sum(&m.usage)).sum())
+            .map(|item| {
+                item.total
+                    .iter()
+                    .filter(|m| !is_retired_model(&m.model))
+                    .map(|m| cost_sum(&m.usage))
+                    .sum()
+            })
             .unwrap_or(0.0);
 
         Ok(UsageResult {
@@ -1128,7 +1295,7 @@ pub fn run() {
             hide_main_window,
             get_app_config,
             save_api_key,
-            clear_api_key,
+            remove_api_key,
             save_refresh_interval,
             save_auto_refresh_enabled,
             save_alert_settings,
